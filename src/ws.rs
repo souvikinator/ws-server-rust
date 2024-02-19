@@ -2,9 +2,8 @@ use crate::messages::{
     BroadcastEvent, BroadcastEventBody, Connect, Disconnect, StreamEvent, StreamEventBody,
     WsMessage,
 };
-use crate::redis_config::RedisData;
 use crate::ws_connection_manager::WsConnectionManager;
-use actix::{fut, ActorContext, ActorFuture, ContextFutureSpawner, WrapFuture};
+use actix::{fut, ActorContext, ContextFutureSpawner, WrapFuture};
 use actix::{Actor, Addr, Running, StreamHandler};
 use actix::{AsyncContext, Handler};
 use actix_web_actors::ws;
@@ -15,7 +14,7 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct WsConnection {
-    connectionManager: Addr<WsConnectionManager>,
+    connection_manager: Addr<WsConnectionManager>,
     hb: Instant,
     id: String,
     client_id: String,
@@ -25,13 +24,13 @@ impl WsConnection {
     pub fn new(
         user_id: String,
         client_id: String,
-        connectionManager: Addr<WsConnectionManager>,
+        connection_manager: Addr<WsConnectionManager>,
     ) -> Self {
         Self {
             id: user_id,
             client_id,
             hb: Instant::now(),
-            connectionManager,
+            connection_manager,
         }
     }
 }
@@ -44,7 +43,7 @@ impl Actor for WsConnection {
 
         let addr = ctx.address();
         actix::ActorFutureExt::then(
-            self.connectionManager
+            self.connection_manager
                 .send(Connect {
                     addr: addr.recipient(),
                     client_id: self.client_id.clone(),
@@ -63,7 +62,7 @@ impl Actor for WsConnection {
     }
 
     fn stopping(&mut self, _: &mut Self::Context) -> Running {
-        self.connectionManager.do_send(Disconnect {
+        self.connection_manager.do_send(Disconnect {
             user_id: self.id.clone(),
             client_id: self.client_id.clone(),
         });
@@ -109,22 +108,22 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
 
                 if msg.message_type == "broadcast_event" {
                     let data: BroadcastEventBody = serde_json::from_str(&msg.data).unwrap();
-                    self.connectionManager.do_send(BroadcastEvent {
+                    self.connection_manager.do_send(BroadcastEvent {
                         user_id: self.id.clone(),
                         client_id: self.client_id.clone(),
                         data,
                     });
                 } else if msg.message_type == "stream_event" {
                     let data: StreamEventBody = serde_json::from_str(&msg.data).unwrap();
-                    self.connectionManager.do_send(StreamEvent {
+                    self.connection_manager.do_send(StreamEvent {
                         user_id: self.id.clone(),
                         client_id: self.client_id.clone(),
                         data,
                     });
                 } else if msg.message_type == "game_data" {
-                    // self.connectionManager.do_send(msg);
+                    // self.connection_manager.do_send(msg);
                 }
-                //      self.connectionManager.do_send(StreamEvent {
+                //      self.connection_manager.do_send(StreamEvent {
                 //     user_id: self.id.clone(),
                 //     msg: s,
                 //     client_id: self.client_id.clone(),

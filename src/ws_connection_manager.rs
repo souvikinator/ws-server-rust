@@ -1,15 +1,24 @@
 use crate::{
     messages::{BroadcastEvent, Connect, Disconnect, StreamEvent, WsMessage},
-    redis_manager::{RedisManager, SetValue},
+    redis_manager::{GetValue, RedisManager, RemoveValue, SetValue},
 };
 use actix::{
+    dev::ContextFutureSpawner,
+    fut,
     prelude::{Actor, Context, Handler, Recipient},
-    Addr,
+    ActorFutureExt, Addr, AsyncContext, WrapFuture,
 };
+use redis::RedisError;
+use serde::{Deserialize, Serialize};
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::format};
 
 type Socket = Recipient<WsMessage>;
+
+#[derive(Serialize, Deserialize)]
+pub struct StreamViewer {
+    pub viewer_id: String,
+}
 
 pub struct WsConnectionManager {
     sessions: HashMap<String, Socket>,
@@ -63,21 +72,19 @@ impl WsConnectionManager {
     //             .unwrap();
     //     }
 
-    //     pub async fn broadcast_message_to_stream(
-    //         &mut self,
-    //         message: &str,
-    //         message_type: String,
-    //         stream_id: &str,
-    //     ) {
-    //         let stream_viewers = self.get_stream_viewers(stream_id).await;
-
-    //         // iterate through stream_viewers and send message to each
-    //         if let viewers = stream_viewers {
-    //             for viewer in viewers {
-    //                 self.send_message(message, message_type.clone(), &viewer.viewer_id);
-    //             }
-    //         }
-    //     }
+    pub fn broadcast_message_to_viewers(
+        &mut self,
+        message: &str,
+        message_type: String,
+        stream_viewers: &Vec<StreamViewer>,
+    ) {
+        // iterate through stream_viewers and send message to each
+        if let viewers = stream_viewers {
+            for viewer in viewers {
+                self.send_message(message, message_type.clone(), &viewer.viewer_id);
+            }
+        }
+    }
 
     //     pub async fn remove_from_stream(&mut self, viewer_id: &str, stream_id: &str) {
     //         let mut stream_viewers = self.get_stream_viewers(stream_id).await;
@@ -121,67 +128,63 @@ impl Handler<Connect> for WsConnectionManager {
     }
 }
 
+// handle ws message related to start and end game broadcast
 impl Handler<BroadcastEvent> for WsConnectionManager {
     type Result = ();
 
-    fn handle(&mut self, msg: BroadcastEvent, _ctx: &mut Context<Self>) -> Self::Result {
-        let key = format!("player:{}:{}", msg.user_id, msg.client_id);
+    fn handle(&mut self, msg: BroadcastEvent, ctx: &mut Context<Self>) -> Self::Result {
+        let player_id = format!("{}:{}", msg.user_id, msg.client_id);
+        let key = format!("player:{}", player_id);
+
         if msg.data.action == "broadcast_start" {
+            let mut viewers: Vec<StreamViewer> = Vec::new();
+            let new_viewer = StreamViewer {
+                viewer_id: player_id,
+            };
+
+            // add player as viewer
+            viewers.push(new_viewer);
+
             self.redis_actor.do_send(SetValue {
                 key: key.clone(),
-                value: "true".to_string(),
+                value: serde_json::to_string(&viewers).unwrap(),
             });
-            // actix::spawn(async move {
-            //     // remove entry from redis and broadcast end stream to everyone
-            //     self.remove_stream(&key).await;
-            //     println!("STOPPING STREAM: {}", key);
-            // });
-            // tokio::spawn(async move {
-            //     // remove entry from redis and broadcast end stream to everyone
-            //     self_ref.remove_stream(&key).await;
-            //     println!("STOPPING STREAM: {}", key);
-            // });
+        } else if msg.data.action == "broadcast_end" {
+            let future = self
+                .redis_actor
+                .send(GetValue(key.clone()))
+                .into_actor(self)
+                .then(move |res, act, _| {
+                    match res {
+                        Ok(res) => {
+                            let redis_response = res.unwrap().unwrap();
+                            let viewers: Vec<StreamViewer> =
+                                serde_json::from_str(redis_response.as_str()).unwrap();
 
-            // self.set_stream_viewers(&key, vec![]).await;
-            // let fut = async move {
-            //     // self.set_stream_viewers(&key, vec![]).await;
-            //     // check for any previous entry, if any then broadcast end stream to everyone
-            //     // print!("SESSIONS {:?}", self.sessions);
-            //     self_ref.set_stream_viewers(&key, vec![]).await;
-            //     println!("STARTING STREAM: {}", key);
-            //     // Ok(())
-            // };
-            // block_in_place(|| {
-            //     tokio::runtime::Runtime::new().unwrap().block_on(async {
-            //         self.set_stream_viewers(&key, vec![]).await;
-            //         println!("STARTING STREAM: {}", key);
-            //     });
-            // })
+                            act.broadcast_message_to_viewers(
+                                "broadcast_end",
+                                "broadcast_event".to_string(),
+                                &viewers,
+                            );
 
-            // Box::pin(fut)
+                            act.redis_actor.do_send(RemoveValue(key.clone()));
+                        }
+                        Err(err) => {
+                            println!("Error getting value from Redis: {:?}", err);
+                        }
+                    }
+                    fut::ready(())
+                });
+
+            // Spawn the future
+            ctx.spawn(future);
         } else {
-            // Handle other cases or return an error result
-            // Box::pin(async { Err(()) })
             println!("UNKNOWN ACTION: {}", msg.data.action);
         }
-        // } else if msg.data.action == "broadcast_end" {
-        //     let fut = async move {
-        //         // remove entry from redis and broadcast end stream to everyone
-        //         self.remove_stream(&key).await;
-        //         println!("STOPPING STREAM: {}", key);
-        //         Ok(())
-        //     };
-        //     Box::pin(fut);
-        // }
-        // broadcast
-        // self.rooms
-        //     .get(&msg.room_id)
-        //     .unwrap()
-        //     .iter()
-        //     .for_each(|client| self.send_message(&msg.msg, client));
     }
 }
 
+// handle ws message related to joining and exiting stream
 impl Handler<StreamEvent> for WsConnectionManager {
     type Result = ();
 

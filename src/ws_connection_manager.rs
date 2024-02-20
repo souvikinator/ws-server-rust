@@ -220,13 +220,18 @@ impl Handler<StreamEvent> for WsConnectionManager {
                                     // remove element from viewers where viewer_id == key
                                     viewers.retain(|viewer| viewer.viewer_id != key);
 
+                                    act.redis_actor.do_send(SetValue {
+                                        key: stream_id.clone(),
+                                        value: serde_json::to_string(&viewers).unwrap(),
+                                    });
+
                                     act.broadcast_message_to_viewers(
                                         format!("stream_left:{}", key).as_str(),
                                         "stream_event".to_string(),
                                         &viewers,
                                     );
 
-                                    act.redis_actor.do_send(RemoveValue(key.clone()));
+                                    // act.redis_actor.do_send(RemoveValue(key.clone()));
                                 } else {
                                     // Handle the response being None
                                     // send message to user that stream is not active

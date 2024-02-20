@@ -157,17 +157,28 @@ impl Handler<BroadcastEvent> for WsConnectionManager {
                 .then(move |res, act, _| {
                     match res {
                         Ok(res) => {
-                            let redis_response = res.unwrap().unwrap();
-                            let viewers: Vec<StreamViewer> =
-                                serde_json::from_str(redis_response.as_str()).unwrap();
+                            // check if res is None
+                            if let Ok(redis_response) = res {
+                                if let Some(value) = redis_response {
+                                    let viewers: Vec<StreamViewer> =
+                                        serde_json::from_str(value.as_str()).unwrap();
 
-                            act.broadcast_message_to_viewers(
-                                "broadcast_end",
-                                "broadcast_event".to_string(),
-                                &viewers,
-                            );
+                                    act.broadcast_message_to_viewers(
+                                        "broadcast_end",
+                                        "broadcast_event".to_string(),
+                                        &viewers,
+                                    );
 
-                            act.redis_actor.do_send(RemoveValue(key.clone()));
+                                    act.redis_actor.do_send(RemoveValue(key.clone()));
+                                } else {
+                                    // Handle the response being None
+                                    // act.send_message(
+                                    //     "stream_end",
+                                    //     "stream_event".to_string(),
+                                    //     ,
+                                    // )
+                                }
+                            }
                         }
                         Err(err) => {
                             println!("Error getting value from Redis: {:?}", err);
@@ -188,19 +199,106 @@ impl Handler<BroadcastEvent> for WsConnectionManager {
 impl Handler<StreamEvent> for WsConnectionManager {
     type Result = ();
 
-    fn handle(&mut self, msg: StreamEvent, _ctx: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, msg: StreamEvent, ctx: &mut Context<Self>) -> Self::Result {
         let key = format!("{}:{}", msg.user_id, msg.client_id);
         let stream_id = msg.data.stream_id.clone();
 
-        if msg.data.action == "stream_join" {
-            // TODO: check if stream active on redis? no then return streamEventResponse
+        if msg.data.action == "stream_leave" {
+            let future = self
+                .redis_actor
+                .send(GetValue(key.clone()))
+                .into_actor(self)
+                .then(move |res, act, _| {
+                    match res {
+                        Ok(res) => {
+                            // check if res is None
+                            if let Ok(redis_response) = res {
+                                if let Some(value) = redis_response {
+                                    let mut viewers: Vec<StreamViewer> =
+                                        serde_json::from_str(value.as_str()).unwrap();
+
+                                    // remove element from viewers where viewer_id == key
+                                    viewers.retain(|viewer| viewer.viewer_id != key);
+
+                                    act.broadcast_message_to_viewers(
+                                        format!("stream_left:{}", key).as_str(),
+                                        "stream_event".to_string(),
+                                        &viewers,
+                                    );
+
+                                    act.redis_actor.do_send(RemoveValue(key.clone()));
+                                } else {
+                                    // Handle the response being None
+                                    // send message to user that stream is not active
+                                    act.send_message("stream_end", "stream_event".to_string(), &key)
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            println!("Error getting value from Redis: {:?}", err);
+                        }
+                    }
+                    fut::ready(())
+                });
+
+            // Spawn the future
+            ctx.spawn(future);
+
+            println!("LEAVING STREAM: {}", msg.user_id);
+        } else if msg.data.action == "stream_join" {
+            let future = self
+                .redis_actor
+                .send(GetValue(key.clone()))
+                .into_actor(self)
+                .then(move |res, act, _| {
+                    match res {
+                        Ok(res) => {
+                            // check if res is None
+                            if let Ok(redis_response) = res {
+                                if let Some(value) = redis_response {
+                                    let mut viewers: Vec<StreamViewer> =
+                                        serde_json::from_str(value.as_str()).unwrap();
+
+                                    // check if key is already in the viewers, if not then add it
+                                    if !viewers.iter().any(|viewer| viewer.viewer_id == key) {
+                                        let new_viewer = StreamViewer {
+                                            viewer_id: key.clone(),
+                                        };
+                                        viewers.push(new_viewer);
+
+                                        act.broadcast_message_to_viewers(
+                                            format!("stream_joined:{}", key).as_str(),
+                                            "stream_event".to_string(),
+                                            &viewers,
+                                        );
+
+                                        act.redis_actor.do_send(SetValue {
+                                            key: key.clone(),
+                                            value: serde_json::to_string(&viewers).unwrap(),
+                                        });
+                                    } else {
+                                        println!("Viewer already in stream");
+                                    }
+                                } else {
+                                    // Handle the response being None
+                                    // send message to user that stream is not active
+                                    act.send_message("stream_end", "stream_event".to_string(), &key)
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            println!("Error getting value from Redis: {:?}", err);
+                        }
+                    }
+                    fut::ready(())
+                });
+
+            // Spawn the future
+            ctx.spawn(future);
+
+            println!("JOINING STREAM: {}", msg.user_id);
             // if yes then add user to the room and request for send_game_state
             // if stream is active then add user to the stream_id in redis
-            println!("JOINING STREAM: {}", msg.user_id);
-        } else if msg.data.action == "stream_leave" {
-            // remove user from the stream_id in redis
-            // self.remove_from_stream(&key, &stream_id);
-            println!("LEAVING STREAM: {}", msg.user_id);
         } else {
             println!("UNKNOWN ACTION: {}", msg.data.action);
         }

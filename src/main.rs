@@ -4,10 +4,11 @@ mod redis_manager;
 mod ws;
 mod ws_connection_manager;
 
-use actix::Actor;
+use actix::{Actor, Message};
 use actix_cors::Cors;
 use actix_web::{get, middleware, web::Data, App, HttpServer};
 use controller::websocket_service;
+use redis::RedisError;
 use redis_manager::RedisManager;
 use ws_connection_manager::WsConnectionManager;
 

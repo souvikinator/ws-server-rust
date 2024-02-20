@@ -248,7 +248,7 @@ impl Handler<StreamEvent> for WsConnectionManager {
         } else if msg.data.action == "stream_join" {
             let future = self
                 .redis_actor
-                .send(GetValue(key.clone()))
+                .send(GetValue(stream_id.clone()))
                 .into_actor(self)
                 .then(move |res, act, _| {
                     match res {
@@ -266,16 +266,16 @@ impl Handler<StreamEvent> for WsConnectionManager {
                                         };
                                         viewers.push(new_viewer);
 
+                                        act.redis_actor.do_send(SetValue {
+                                            key: stream_id.clone(),
+                                            value: serde_json::to_string(&viewers).unwrap(),
+                                        });
+
                                         act.broadcast_message_to_viewers(
                                             format!("stream_joined:{}", key).as_str(),
                                             "stream_event".to_string(),
                                             &viewers,
                                         );
-
-                                        act.redis_actor.do_send(SetValue {
-                                            key: key.clone(),
-                                            value: serde_json::to_string(&viewers).unwrap(),
-                                        });
                                     } else {
                                         println!("Viewer already in stream");
                                     }
